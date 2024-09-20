@@ -10,6 +10,7 @@ use dirs::home_dir;
 use std::path::PathBuf;
 use uuid::Uuid;
 use std::process::Command;
+use native_dialog::{MessageDialog, MessageType};
 
 fn find_obsidian_cli() -> Option<PathBuf> {
     which::which("obsidian-cli").ok()
@@ -52,7 +53,9 @@ fn monitor_clipboard() -> Result<(), Box<dyn std::error::Error>> {
                 ).unwrap();
                 
                 let md_path = save_image_and_markdown(&buffer)?;
-                open_obsidian_cli(&obsidian_cli_path, &md_path)?;
+                if ask_to_open_obsidian() {
+                    open_obsidian_cli(&obsidian_cli_path, &md_path)?;
+                }
                 
                 last_image_hash = new_hash;
                 clipboard_changed = true;
@@ -160,6 +163,23 @@ fn open_obsidian_cli(obsidian_cli_path: &PathBuf, md_path: &PathBuf) -> Result<(
         .spawn()?;
     println!("Obsidian geöffnet mit: {}", file_name);
     Ok(())
+}
+
+fn ask_to_open_obsidian() -> bool {
+    let output = Command::new("yad")
+        .args(&[
+            "--title=Obsidian öffnen",
+            "--text=Möchten Sie Obsidian öffnen?",
+            "--button=Ja:0",
+            "--button=Nein:1",
+            "--center",
+            "--width=300",
+            "--height=100"
+        ])
+        .output()
+        .expect("Failed to execute yad");
+
+    output.status.success()
 }
 
 
