@@ -10,7 +10,6 @@ use dirs::home_dir;
 use std::path::PathBuf;
 use uuid::Uuid;
 use std::process::Command;
-use native_dialog::{MessageDialog, MessageType};
 
 fn find_obsidian_cli() -> Option<PathBuf> {
     which::which("obsidian-cli").ok()
@@ -124,7 +123,7 @@ fn save_image_and_markdown(buffer: &RgbaImage) -> Result<PathBuf, Box<dyn std::e
 
 fn save_text(text: &str) -> Result<(), Box<dyn std::error::Error>> {
     let timestamp = Local::now().format("%d.%m.%Y %H:%M");
-    let txt_filename = generate_unique_filename("clipboard_text", ".txt");
+    let txt_filename = generate_unique_filename("clipboard_text", ".md");
     
     let mut path = home_dir().unwrap();
     path.push("Nextcloud");
