@@ -11,6 +11,93 @@ use std::path::PathBuf;
 use uuid::Uuid;
 use std::process::Command;
 use std::fs::OpenOptions;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Config {
+    screenshots_path: PathBuf,
+    notes_path: PathBuf,
+    last_updated: String,
+}
+
+impl Config {
+    fn new() -> Self {
+        Config {
+            screenshots_path: default_screenshots_path(),
+            notes_path: default_notes_path(),
+            last_updated: Local::now().format("%d.%m.%Y %H:%M:%S").to_string(),
+        }
+    }
+}
+
+fn default_screenshots_path() -> PathBuf {
+    let mut path = home_dir().unwrap_or_default();
+    path.push("Nextcloud/Obsy/Screenshots");
+    path
+}
+
+fn default_notes_path() -> PathBuf {
+    let mut path = home_dir().unwrap_or_default();
+    path.push("Nextcloud/Obsy/Notes");
+    path
+}
+
+fn get_config_path() -> PathBuf {
+    let mut config_path = home_dir().unwrap_or_default();
+    config_path.push(".config/clipboard-monitor/config.json");
+    config_path
+}
+
+fn load_or_create_config() -> Result<Config, Box<dyn std::error::Error>> {
+    let config_path = get_config_path();
+
+    if config_path.exists() {
+        let config_str = fs::read_to_string(&config_path)?;
+        let config: Config = serde_json::from_str(&config_str)?;
+        return Ok(config);
+    }
+
+    let mut config = Config::new();
+
+    if let Ok(output) = Command::new("zenity")
+        .args(&[
+            "--file-selection",
+            "--directory",
+            "--title=Wähle Screenshots Ordner"
+        ])
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(path) = String::from_utf8(output.stdout) {
+                config.screenshots_path = PathBuf::from(path.trim_end());
+            }
+        }
+    }
+
+    if let Ok(output) = Command::new("zenity")
+        .args(&[
+            "--file-selection",
+            "--directory",
+            "--title=Wähle Notizen Ordner"
+        ])
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(path) = String::from_utf8(output.stdout) {
+                config.notes_path = PathBuf::from(path.trim_end());
+            }
+        }
+    }
+
+    if let Some(config_dir) = config_path.parent() {
+        fs::create_dir_all(config_dir)?;
+    }
+
+    let config_str = serde_json::to_string_pretty(&config)?;
+    fs::write(&config_path, config_str)?;
+
+    Ok(config)
+}
 
 fn find_obsidian_cli() -> Option<PathBuf> {
     which::which("obsidian-cli").ok()
@@ -33,13 +120,11 @@ fn log_to_file(message: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn monitor_clipboard() -> Result<(), Box<dyn std::error::Error>> {
-    // Stelle sicher, dass DISPLAY gesetzt ist
+fn monitor_clipboard(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("DISPLAY").is_err() {
         std::env::set_var("DISPLAY", ":0");
     }
     
-    // Retry-Mechanismus für Clipboard-Initialisierung
     let mut retry_count = 0;
     let max_retries = 3;
     let mut clipboard = loop {
@@ -77,7 +162,6 @@ fn monitor_clipboard() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let mut clipboard_changed = false;
 
-        // Überprüfe auf Bilder
         if let Ok(image) = clipboard.get_image() {
             let new_hash = calculate_hash(&image.bytes);
             
@@ -90,7 +174,7 @@ fn monitor_clipboard() -> Result<(), Box<dyn std::error::Error>> {
                     image.bytes.into_owned(),
                 ).unwrap();
                 
-                let md_path = save_image_and_markdown(&buffer)?;
+                let md_path = save_image_and_markdown(&buffer, config)?;
                 if ask_to_open_obsidian() {
                     open_obsidian_cli(&obsidian_cli_path, &md_path)?;
                 }
@@ -100,7 +184,6 @@ fn monitor_clipboard() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Überprüfe auf Text
         if let Ok(text) = clipboard.get_text() {
             if !text.is_empty() {
                 let new_hash = calculate_hash(text.as_bytes());
@@ -108,7 +191,7 @@ fn monitor_clipboard() -> Result<(), Box<dyn std::error::Error>> {
                 if new_hash != last_text_hash {
                     log_to_file(&format!("Neuer Text in der Zwischenablage gefunden: {} Zeichen", text.len()))?;
                     
-                    match save_text(&text) {
+                    match save_text(&text, config) {
                         Ok(_) => log_to_file("Text erfolgreich gespeichert")?,
                         Err(e) => log_to_file(&format!("Fehler beim Speichern des Texts: {}", e))?,
                     }
@@ -142,33 +225,17 @@ fn generate_unique_filename(prefix: &str, extension: &str) -> String {
     format!("{}_{}_{}{}",prefix, timestamp, uuid, extension)
 }
 
-fn save_image_and_markdown(buffer: &RgbaImage) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn save_image_and_markdown(buffer: &RgbaImage, config: &Config) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let timestamp = Local::now().format("%d.%m.%Y um %H:%M");
     let png_filename = generate_unique_filename("clipboard_image", ".png");
     let md_filename = generate_unique_filename("Screenshot", ".md");
     
-    let mut path = home_dir().ok_or("Home-Verzeichnis nicht gefunden")?;
-    path.push("Nextcloud");
-    path.push("Obsy");
-    path.push("Screenshots");
+    fs::create_dir_all(&config.screenshots_path)?;
     
-    // Mehrere Versuche, das Verzeichnis zu erstellen
-    let max_retries = 3;
-    for attempt in 1..=max_retries {
-        match fs::create_dir_all(&path) {
-            Ok(_) => break,
-            Err(e) if attempt == max_retries => return Err(e.into()),
-            Err(e) => {
-                log_to_file(&format!("Fehler beim Erstellen des Verzeichnisses (Versuch {}): {}", attempt, e))?;
-                sleep(Duration::from_millis(500));
-            }
-        }
-    }
-    
-    let png_path = path.join(&png_filename);
+    let png_path = config.screenshots_path.join(&png_filename);
     buffer.save(&png_path)?;
     
-    let md_path = path.join(&md_filename);
+    let md_path = config.screenshots_path.join(&md_filename);
     let timestamp_str = timestamp.to_string();
     create_markdown_file(&md_path, &png_filename, &timestamp_str)?;
     
@@ -178,8 +245,7 @@ fn save_image_and_markdown(buffer: &RgbaImage) -> Result<PathBuf, Box<dyn std::e
     Ok(md_path)
 }
 
-fn save_text(text: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Zeige Text in yad an (max. 100 Zeichen für die Vorschau)
+fn save_text(text: &str, config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let preview = text.chars().take(100).collect::<String>();
     let preview = if text.len() > 100 { format!("{}...", preview) } else { preview };
     
@@ -187,24 +253,19 @@ fn save_text(text: &str) -> Result<(), Box<dyn std::error::Error>> {
         .args(&[
             "--title=Text gespeichert",
             &format!("--text={}", preview),
-            "--timeout=1",  // 1 Sekunde Timeout
+            "--timeout=1",
             "--no-buttons",
             "--center",
             "--width=400"
         ])
         .spawn()?;
 
-    // Ursprüngliche Speicherfunktion
     let timestamp = Local::now().format("%d.%m.%Y um %H:%M");
     let txt_filename = generate_unique_filename("clipboard_text", ".md");
     
-    let mut path = home_dir().unwrap();
-    path.push("Nextcloud");
-    path.push("Obsy");
-    path.push("Notes");
-    fs::create_dir_all(&path)?;
+    fs::create_dir_all(&config.notes_path)?;
     
-    let txt_path = path.join(&txt_filename);
+    let txt_path = config.notes_path.join(&txt_filename);
     let mut file = File::create(&txt_path)?;
     writeln!(file, "Text aus der Zwischenablage vom {}", timestamp)?;
     writeln!(file)?;
@@ -255,17 +316,24 @@ fn ask_to_open_obsidian() -> bool {
                 if let Err(log_err) = log_to_file(&format!("Fehler beim Ausführen von yad: {}", e)) {
                     eprintln!("Logging-Fehler: {}", log_err);
                 }
-                false // Standardmäßig nicht öffnen, wenn yad fehlschlägt
+                false
             }
         }
 }
 
 fn main() {
-    if let Err(e) = monitor_clipboard() {
-        let error_msg = format!("Fehler: {}", e);
-        if let Err(log_err) = log_to_file(&error_msg) {
-            eprintln!("Fehler beim Logging: {}", log_err);
-            eprintln!("{}", error_msg);
+    match load_or_create_config() {
+        Ok(config) => {
+            if let Err(e) = monitor_clipboard(&config) {
+                let error_msg = format!("Fehler: {}", e);
+                if let Err(log_err) = log_to_file(&error_msg) {
+                    eprintln!("Fehler beim Logging: {}", log_err);
+                    eprintln!("{}", error_msg);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Fehler beim Laden der Konfiguration: {}", e);
         }
     }
 }
