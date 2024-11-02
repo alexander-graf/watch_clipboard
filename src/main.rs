@@ -230,6 +230,24 @@ fn save_image_and_markdown(buffer: &RgbaImage, config: &Config) -> Result<PathBu
     let png_filename = generate_unique_filename("clipboard_image", ".png");
     let md_filename = generate_unique_filename("Screenshot", ".md");
     
+    let tags = match Command::new("yad")
+        .args(&[
+            "--title=Tags eingeben",
+            "--text=Geben Sie Tags ein (mit Komma getrennt):",
+            "--entry",
+            "--center",
+            "--width=300"
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .to_string()
+        },
+        _ => String::new(),
+    };
+    
     fs::create_dir_all(&config.screenshots_path)?;
     
     let png_path = config.screenshots_path.join(&png_filename);
@@ -237,7 +255,7 @@ fn save_image_and_markdown(buffer: &RgbaImage, config: &Config) -> Result<PathBu
     
     let md_path = config.screenshots_path.join(&md_filename);
     let timestamp_str = timestamp.to_string();
-    create_markdown_file(&md_path, &png_filename, &timestamp_str)?;
+    create_markdown_file(&md_path, &png_filename, &timestamp_str, &tags)?;
     
     log_to_file(&format!("Bild gespeichert als: {}", png_path.display()))?;
     log_to_file(&format!("Markdown-Datei erstellt: {}", md_path.display()))?;
@@ -245,21 +263,26 @@ fn save_image_and_markdown(buffer: &RgbaImage, config: &Config) -> Result<PathBu
     Ok(md_path)
 }
 
-fn save_text(text: &str, config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    let preview = text.chars().take(100).collect::<String>();
-    let preview = if text.len() > 100 { format!("{}...", preview) } else { preview };
+fn create_markdown_file(path: &PathBuf, image_filename: &str, timestamp: &str, tags: &str) -> Result<(), std::io::Error> {
+    let mut file = File::create(path)?;
+    writeln!(file, "## Screenshot vom {}", timestamp)?;
+    writeln!(file)?;
     
-    Command::new("yad")
-        .args(&[
-            "--title=Text gespeichert",
-            &format!("--text={}", preview),
-            "--timeout=1",
-            "--no-buttons",
-            "--center",
-            "--width=400"
-        ])
-        .spawn()?;
+    if !tags.is_empty() {
+        for tag in tags.split(',') {
+            let tag = tag.trim();
+            if !tag.is_empty() {
+                writeln!(file, "#{}", tag)?;
+            }
+        }
+        writeln!(file)?;
+    }
+    
+    writeln!(file, "![Screenshot]({})", image_filename)?;
+    Ok(())
+}
 
+fn save_text(text: &str, config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let timestamp = Local::now().format("%d.%m.%Y um %H:%M");
     let txt_filename = generate_unique_filename("clipboard_text", ".md");
     
@@ -273,15 +296,6 @@ fn save_text(text: &str, config: &Config) -> Result<(), Box<dyn std::error::Erro
     
     log_to_file(&format!("Text gespeichert als: {}", txt_path.display()))?;
     
-    Ok(())
-}
-
-fn create_markdown_file(path: &PathBuf, image_filename: &str, timestamp: &str) -> Result<(), std::io::Error> {
-    let mut file = File::create(path)?;
-    writeln!(file, "## Screenshot vom {}", timestamp)?;
-    writeln!(file)?;
-    writeln!(file)?;
-    writeln!(file, "![Screenshot]({})", image_filename)?;
     Ok(())
 }
 
